@@ -1,0 +1,74 @@
+# يبني ملف APK تلقائياً عند كل رفع للكود، وينشره في صفحة Releases للتنزيل من الهاتف
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create Android project files
+        run: flutter create --platforms=android --org dz.delivery --project-name delivery_admin .
+
+      - name: Configure Android (permissions, name, minSdk)
+        run: python3 .github/scripts/patch_android.py
+
+      # مفتاح توقيع ثابت: بدونه يرفض الهاتف تثبيت التحديث فوق النسخة المثبتة
+      - name: Release signing key
+        env:
+          SIGNING_PASS: ${{ secrets.SIGNING_PASS }}
+        run: |
+          if [ -n "$SIGNING_PASS" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in .github/signing/release.jks.enc -out android/app/release.jks -pass env:SIGNING_PASS
+            P="$SIGNING_PASS"
+          else
+            echo "::warning::السر SIGNING_PASS غير موجود: وُقّعت النسخة بمفتاح مؤقت فلن تُثبَّت فوق نسخة سابقة"
+            P="temp-$RANDOM$RANDOM$RANDOM"
+            keytool -genkeypair -keystore android/app/release.jks -storetype PKCS12 -alias delivery -keyalg RSA -keysize 2048 -validity 60 -storepass "$P" -keypass "$P" -dname "CN=Temporary"
+          fi
+          printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=delivery\nkeyPassword=%s\n' "$P" "$P" > android/key.properties
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: App icon
+        run: dart run flutter_launcher_icons
+
+      - name: Build APK
+        run: flutter build apk --release --dart-define=BUILD=${{ github.run_number }} --build-number=${{ github.run_number }}
+
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk Admin-${{ github.run_number }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Admin-apk
+          path: Admin-${{ github.run_number }}.apk
+
+      # التشغيل اليدوي على فرع آخر يبني فقط للتجربة، والنشر يكون من main
+      - name: Publish to Releases
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: الإدارة — نسخة ${{ github.run_number }}
+          body: نزّل ملف Admin-${{ github.run_number }}.apk على هاتفك وثبّته.
+          files: Admin-${{ github.run_number }}.apk
